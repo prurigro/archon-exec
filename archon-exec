@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+#
+# archon.sh: wrapper for ARChon and chromeos-apk to launch APKs in a single step
+#
+# Author: Kevin MacMartin
+# Released under the MIT license
+# Version: 1.1
+#
+
+# The APK installation directory
+[[ -z "$ARCHON_APKROOT" ]] \
+    && ARCHON_APKROOT='/tmp/archon'
+
+[[ -z "$ARCHON_CONFIG" ]] \
+    && ARCHON_CONFIG="$HOME/.config/archon"
+
+# The ARChon directory path
+[[ -z "$ARCHON_PATH" ]] \
+    && ARCHON_PATH='/opt/archon/'
+
+# The script's file name
+SCRIPT="$(sed 's|^.*/||' <<< "$0")"
+
+# The argument passed to the script (should be an APK file)
+APKFILE="$1"
+
+# Only allow variables set in this script from now on
+set -o nounset
+
+function create_apk_dir() {
+    # Create and enter the folder to contain the extracted APK
+    install -d "$ARCHON_APKROOT/$SUM"
+    pushd "$ARCHON_APKROOT/$SUM" >/dev/null
+
+    # Generate the APK folder using chromeos-apk
+    chromeos-apk -a --tablet "$1" >chromeos-apk.log
+
+    # Fix the "There is no message element for key extName" error
+    [[ $(grep -r 'appNotSupported') ]] && {
+        APPDIR=$(ls -1 --group-directories-first | head -n 1)
+        EXTNAME=$(cat "$APPDIR/manifest.json" \
+            | grep '"name":' \
+            | head -n 1 \
+            | sed 's|[^"]*"name"[^"]*"||;s|".*||')
+
+        for msgfile in $(find "$APPDIR/_locales" -type f -name 'messages.json'); do
+            echo -e '{\n  "extName": {\n    "description": "'"$EXTNAME"'",\n    "message": ""\n  }\n}' > "$msgfile"
+        done
+    }
+
+    # Return to the original folder
+    popd >/dev/null
+}
+
+# Exit with an error if the ARChon directory is missing
+[[ ! -d "$ARCHON_PATH" ]] && {
+    echo "ERROR: the ARChon directory configured @ '$ARCHON_PATH' does not exist"
+    exit 1
+}
+
+# Set $CHROME to the first binary found in $CHROME_NAMES or exit with an error
+CHROME_NAMES=('chromium' 'chrome' 'google-chrome' 'google-chrome-stable')
+for chrome_test in ${CHROME_NAMES[@]}; do
+    CHROME=$(type -P "$chrome_test")
+    [[ -n "$CHROME" ]] \
+        && break
+done
+[[ -z "$CHROME" ]] && {
+    echo "ERROR: couldn't detect chrome/chromium in PATH"
+    exit 1
+}
+
+[[ ! $(type -P chromeos-apk) ]] && {
+    echo "ERROR: couldn't detect chromeos-apk in PATH"
+    exit 1
+}
+
+# Show usage information and exit if the user attempts to run without input
+[[ -z "$APKFILE" ]] && {
+    echo "Usage: $SCRIPT <path-to-apk-file>"
+    exit 1
+}
+
+# Display error and exit if $APKFILE isn't pointing at a file
+[[ ! -f "$APKFILE" ]] && {
+    echo "ERROR: an APK file @ '$APKFILE' does not exist"
+    exit 1
+}
+
+# Store the md5sum of the APK so different versions won't overwrite eachother
+SUM=$(md5sum "$APKFILE" | sed 's| .*||')
+
+# Delete the existing apk directory if it doesn't contain exactly one folder
+[[ -d "$ARCHON_APKROOT/$SUM" ]] \
+    && [[ ! $(find "$ARCHON_APKROOT/$SUM" -maxdepth 1 -mindepth 1 -type d | wc -l) = 1 ]] \
+        && rm -rf "$ARCHON_APKROOT/$SUM"
+
+# If an app directory doesn't exist, create one and extract the APK using chromeos-apk
+[[ ! -d "$ARCHON_APKROOT/$SUM" ]] \
+    && create_apk_dir "$(readlink -f "$APKFILE")"
+
+# Evaluate the name of the directory containing the app
+APPDIR=$(find "$ARCHON_APKROOT/$SUM" -maxdepth 1 -mindepth 1 -type d | sed 's|^.*/||')
+
+# Remove the apk folder and exit with an error if an app directory doesn't exist
+[[ -z "$APPDIR" ]] && {
+    echo 'ERROR: failed to extract APK to "'"$ARCHON_APKROOT/$SUM"'"'
+    [[ -d "$ARCHON_APKROOT/$SUM" ]] \
+        && rm -rf "$ARCHON_APKROOT/$SUM"
+    exit 1
+}
+
+# The common part of the launch command to launch the extracted APK using ARChon
+EXE="$CHROME"' --user-data-dir='"$ARCHON_CONFIG"' --profile-directory='"$APPDIR"' --silent-launch'
+
+# Start ARChon
+$EXE --load-and-launch-app="$ARCHON_PATH" > /dev/null 2>&1 &
+sleep 1
+
+# Launch the Android app
+$EXE --load-and-launch-app="$ARCHON_APKROOT/$SUM/$APPDIR" > "$ARCHON_APKROOT/$SUM/run.log" &
+sleep 1
+
+# Cleanup the non-functional auto-generated XDG desktop file
+XDGDESKTOP="$(ls "$HOME/.local/share/applications" | egrep 'chrome-.*-'"$APPDIR"'\.desktop')"
+[[ -n "$XDGDESKTOP" ]] \
+    && rm "$HOME/.local/share/applications/$XDGDESKTOP"
+
+exit 0
