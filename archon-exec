@@ -4,47 +4,89 @@
 #
 # Author: Kevin MacMartin
 # Released under the MIT license
-# Version: 1.1
+# Version: 1.2
 #
 
 # The APK installation directory
-[[ -z "$ARCHON_APKROOT" ]] \
-    && ARCHON_APKROOT='/tmp/archon'
+ARCHON_APKROOT=${ARCHON_APKROOT:='/tmp/archon'}
 
-[[ -z "$ARCHON_CONFIG" ]] \
-    && ARCHON_CONFIG="$HOME/.config/archon"
+# The archon-exec config file
+ARCHON_CONFIG=${ARCHON_CONFIG:="$HOME/.config/archon"}
 
 # The ARChon directory path
-[[ -z "$ARCHON_PATH" ]] \
-    && ARCHON_PATH='/opt/archon/'
-
-# The script's file name
-SCRIPT="$(sed 's|^.*/||' <<< "$0")"
-
-# The argument passed to the script (should be an APK file)
-APKFILE="$1"
+ARCHON_PATH=${ARCHON_PATH:='/opt/archon/'}
 
 # Only allow variables set in this script from now on
 set -o nounset
 
-function create_apk_dir() {
+# Colourscheme
+[[ -t 1 ]] && {
+    c_grey=$'\e[1;30m'    # DARK GREY
+    c_red=$'\e[1;31m'     # RED
+    c_green=$'\e[1;32m'   # GREEN
+    c_yellow=$'\e[1;33m'  # YELLOW
+    c_blue=$'\e[1;34m'    # BLUE
+    c_magenta=$'\e[1;35m' # VIOLET
+    c_teal=$'\e[1;36m'    # TEAL
+    c_white=$'\e[1;37m'   # WHITE
+    c_clear=$'\e[0m'      # DISABLES COLOUR
+}
+
+# The script's file name
+script="${0//*\/}"
+
+# The argument passed to the script (should be an APK file)
+apkfile="$1"
+
+# Display usage information
+function usage() {
+    printf '%s\n' "${c_blue}USAGE:$c_clear $c_yellow$script$c_clear [${c_white}PATH-TO-APK$c_clear]"
+}
+
+# Display an error and exit with an error
+function error() {
+    printf '%s %s\n' "${c_red}ERROR:$c_clear" "$1" >&2
+    exit 1
+}
+
+# Evaluate the name of the directory containing the app
+function getappdir() {
+    for each in "$ARCHON_APKROOT/$checksum/"*; do
+        [[ -d "$each" ]] && {
+            appdir="$each"
+            appdir="${appdir/*\/}"
+            break
+        }
+    done
+
+    # Remove the apk folder and exit with an error if an app directory doesn't exist
+    [[ -z "$appdir" ]] && {
+        printf '%s\n' "${c_red}ERROR:$c_clear failed to extract APK to: $c_magenta$ARCHON_APKROOT/$checksum$c_clear"
+        [[ -d "$ARCHON_APKROOT/$checksum" ]] \
+            && rm -rf "${ARCHON_APKROOT:?}/${checksum:?}"
+        exit 1
+    }
+}
+
+# Creates an app directory for the APK
+function create_appdir() {
     # Create and enter the folder to contain the extracted APK
-    install -d "$ARCHON_APKROOT/$SUM"
-    pushd "$ARCHON_APKROOT/$SUM" >/dev/null
+    install -d "$ARCHON_APKROOT/$checksum"
+    pushd "$ARCHON_APKROOT/$checksum" >/dev/null
 
     # Generate the APK folder using chromeos-apk
     chromeos-apk -a --tablet "$1" >chromeos-apk.log
 
     # Fix the "There is no message element for key extName" error
-    [[ $(grep -r 'appNotSupported') ]] && {
-        APPDIR=$(ls -1 --group-directories-first | head -n 1)
-        EXTNAME=$(cat "$APPDIR/manifest.json" \
-            | grep '"name":' \
-            | head -n 1 \
-            | sed 's|[^"]*"name"[^"]*"||;s|".*||')
+    grep -qr 'appNotSupported' && {
+        getappdir
+        extname=$(egrep -m 1 '^\s*"name":' "$appdir/manifest.json")
+        extname=${extname%\",}
+        extname=${extname/*\"}
 
-        for msgfile in $(find "$APPDIR/_locales" -type f -name 'messages.json'); do
-            echo -e '{\n  "extName": {\n    "description": "'"$EXTNAME"'",\n    "message": ""\n  }\n}' > "$msgfile"
+        for langdir in "$appdir/_locales/"*; do
+            [[ -f "$langdir/messages.json" ]] \
+                && printf '%s\n  %s\n    %s%s%s\n    %s\n  %s\n%s\n' '{' '"extName": {' '"description": "' "$extname" '",' '"message": ""' '}' '}' > "$langdir/messages.json"
         done
     }
 
@@ -53,77 +95,74 @@ function create_apk_dir() {
 }
 
 # Exit with an error if the ARChon directory is missing
-[[ ! -d "$ARCHON_PATH" ]] && {
-    echo "ERROR: the ARChon directory configured @ '$ARCHON_PATH' does not exist"
-    exit 1
-}
+[[ -d "$ARCHON_PATH" ]] \
+    || error "the ARChon directory configured @ $c_magenta$ARCHON_PATH$c_clear does not exist"
 
-# Set $CHROME to the first binary found in $CHROME_NAMES or exit with an error
-CHROME_NAMES=('chromium' 'chrome' 'google-chrome' 'google-chrome-stable')
-for chrome_test in ${CHROME_NAMES[@]}; do
-    CHROME=$(type -P "$chrome_test")
-    [[ -n "$CHROME" ]] \
+# Set $chrome to the first binary found in $chromenames or exit with an error
+chromenames=('chromium' 'chrome' 'google-chrome' 'google-chrome-stable')
+for chrome_test in "${chromenames[@]}"; do
+    chrome=$(type -P "$chrome_test")
+    [[ -n "$chrome" ]] \
         && break
 done
-[[ -z "$CHROME" ]] && {
-    echo "ERROR: couldn't detect chrome/chromium in PATH"
-    exit 1
-}
+[[ -n "$chrome" ]] \
+    || error "couldn't detect ${c_magenta}chrome$c_clear/${c_magenta}chromium$c_clear in PATH"
 
-[[ ! $(type -P chromeos-apk) ]] && {
-    echo "ERROR: couldn't detect chromeos-apk in PATH"
-    exit 1
-}
+type -P chromeos-apk >/dev/null \
+    || error "couldn't detect ${c_magenta}chromeos-apk$c_clear in PATH"
 
 # Show usage information and exit if the user attempts to run without input
-[[ -z "$APKFILE" ]] && {
-    echo "Usage: $SCRIPT <path-to-apk-file>"
-    exit 1
-}
+if [[ "$apkfile" = '-h' ]] || [[ "$apkfile" = '--help' ]]; then
+    usage
+    exit 0
+fi
 
-# Display error and exit if $APKFILE isn't pointing at a file
-[[ ! -f "$APKFILE" ]] && {
-    echo "ERROR: an APK file @ '$APKFILE' does not exist"
-    exit 1
-}
+[[ -z "$apkfile" ]] \
+    && error "no ${c_magenta}APK file$c_clear provided as an argument"
+
+# Display error and exit if $apkfile isn't pointing at a file
+[[ -f "$apkfile" ]] \
+    || error "no file exists @ $c_magenta$apkfile$c_clear"
 
 # Store the md5sum of the APK so different versions won't overwrite eachother
-SUM=$(md5sum "$APKFILE" | sed 's| .*||')
+checksum=$(md5sum "$apkfile")
+checksum="${checksum/ *}"
+
+[[ -z "$checksum" ]] \
+    && error "unable to calculate the checksum of $c_magenta$apkfile$c_clear"
 
 # Delete the existing apk directory if it doesn't contain exactly one folder
-[[ -d "$ARCHON_APKROOT/$SUM" ]] \
-    && [[ ! $(find "$ARCHON_APKROOT/$SUM" -maxdepth 1 -mindepth 1 -type d | wc -l) = 1 ]] \
-        && rm -rf "$ARCHON_APKROOT/$SUM"
-
-# If an app directory doesn't exist, create one and extract the APK using chromeos-apk
-[[ ! -d "$ARCHON_APKROOT/$SUM" ]] \
-    && create_apk_dir "$(readlink -f "$APKFILE")"
-
-# Evaluate the name of the directory containing the app
-APPDIR=$(find "$ARCHON_APKROOT/$SUM" -maxdepth 1 -mindepth 1 -type d | sed 's|^.*/||')
-
-# Remove the apk folder and exit with an error if an app directory doesn't exist
-[[ -z "$APPDIR" ]] && {
-    echo 'ERROR: failed to extract APK to "'"$ARCHON_APKROOT/$SUM"'"'
-    [[ -d "$ARCHON_APKROOT/$SUM" ]] \
-        && rm -rf "$ARCHON_APKROOT/$SUM"
-    exit 1
+[[ -d "$ARCHON_APKROOT/$checksum" ]] && {
+    count=0
+    for each in "$ARCHON_APKROOT/$checksum/"*; do
+        [[ -d "$each" ]] \
+            && (( count++ ))
+    done
+    [[ "$count" = 1 ]] \
+        || rm -rf "${ARCHON_APKROOT:?}/${checksum:?}"
 }
 
+# If an app directory doesn't exist, create one and extract the APK using chromeos-apk
+if [[ -d "$ARCHON_APKROOT/$checksum" ]]; then
+    getappdir
+else
+    create_appdir "$apkfile"
+fi
+
 # The common part of the launch command to launch the extracted APK using ARChon
-EXE="$CHROME"' --user-data-dir='"$ARCHON_CONFIG"' --profile-directory='"$APPDIR"' --silent-launch'
+runchrome="$chrome"' --user-data-dir='"$ARCHON_CONFIG"' --profile-directory='"$appdir"' --silent-launch'
 
 # Start ARChon
-$EXE --load-and-launch-app="$ARCHON_PATH" > /dev/null 2>&1 &
+$runchrome --load-and-launch-app="$ARCHON_PATH" > /dev/null 2>&1 &
 sleep 1
 
 # Launch the Android app
-$EXE --load-and-launch-app="$ARCHON_APKROOT/$SUM/$APPDIR" > "$ARCHON_APKROOT/$SUM/run.log" &
-sleep 1
+$runchrome --load-and-launch-app="$ARCHON_APKROOT/$checksum/$appdir" > "$ARCHON_APKROOT/$checksum/run.log" 2>&1 &
 
-# Cleanup the non-functional auto-generated XDG desktop file
-XDGDESKTOP="$(ls "$HOME/.local/share/applications" | egrep 'chrome-.*-'"$APPDIR"'\.desktop')"
-[[ -n "$XDGDESKTOP" ]] \
-    && rm "$HOME/.local/share/applications/$XDGDESKTOP"
+# Wait a few seconds until chrome has loaded, then remove the non-functional auto-generated XDG desktop file
+(
+    sleep 5
+    rm -f "$HOME/.local/share/applications/chrome-"*"-${appdir}.desktop"
+) &
 
 exit 0
